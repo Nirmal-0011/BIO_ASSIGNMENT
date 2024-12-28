@@ -1,0 +1,405 @@
+---
+title: "Breast Cancer Analysis"
+output: html_document
+date: "2024-12-23"
+---
+
+##1. Download the dataset
+
+I have downloaded the data set from cbioportal.
+
+##2. Untar the folder and extract the files
+
+```{r}
+# set the file path
+path = "C:/Users/nirma/Downloads"
+file_path = paste(path,"brca_tcga_pan_can_atlas_2018 (1).tar.gz",sep = "/")
+
+#untar the folder 
+untar(file_path)
+
+my_folder_path = paste(getwd(),"brca_tcga_pan_can_atlas_2018",sep = "/")
+```
+
+##3. Read the RNA-seq file
+
+```{r}
+RNA_seq_path = paste(my_folder_path,"data_mrna_seq_v2_rsem.txt",sep = "/")
+#reading the RNA-seq file
+RNA_seq_data = read.delim(RNA_seq_path,header = TRUE)
+```
+
+##4. Read the Patient Data file
+
+
+```{r}
+#specifying path to the patient data file
+patient_data = paste(my_folder_path,"data_clinical_patient.txt",sep = "/")
+```
+
+```{r}
+#read patient data using read.delim()
+read_patient_data = read.delim(patient_data,header = TRUE)
+```
+
+```{r}
+#skip or remove the first four rows with column descriptions
+read_patient_data = read_patient_data[5:nrow(read_patient_data), ]
+```
+
+## 5. Read the Copy Number Abberations Data (CNA)
+
+```{r}
+#specifying the path to the cna data
+abberations_data = paste(my_folder_path,"data_cna.txt",sep = "/")
+```
+
+
+```{r}
+#reading the cna data
+read_cna_data = read.delim(abberations_data,header = TRUE)
+```
+
+## 6. Match RNA-seq id's with the patient id's and cna id's 
+
+Here the task is to match the RNA-seq id's with the patient id's and CNA id's.
+First I use the head() function to take a look at the dataset. This is to ensure
+that the ID's are in the same format, so that matching can be done. 
+```{r}
+# a quick look at the RNA-seq data
+head(RNA_seq_data)
+```
+
+```{r}
+#a quick look at the patient data
+head(read_patient_data)
+```
+
+
+```{r}
+#a quick look at the cna data
+head(read_cna_data)
+```
+
+```{r}
+assay = round(as.matrix(RNA_seq_data[,-c(1,2)])) 
+rownames(assay) = RNA_seq_data[,1]
+
+# Find the row where the first column has "ERBB2"
+row_ERBB2 = which(read_cna_data[, 1] == "ERBB2")
+
+# getting ERBB2 count
+value_ERBB2 = matrix(read_cna_data[row_ERBB2, 3:ncol(read_cna_data)], 
+                    ncol = 1, 
+                    dimnames = list(colnames(read_cna_data)[3:ncol(read_cna_data)], "ERBB2_Count"))
+
+
+```
+
+The next step is to match RNA-seq patient ids with CNA ids and the patient data
+ids. 
+
+Here there is an issue with the patient ids in CNA data and requires some 
+cleaning procedures to match it with other IDs in other datasets.
+
+# 6. matching and subsetting pateint_Id with RNA_seq_data & CNA_data
+
+```{r}
+# matching patient ID's across the three datasets
+
+
+modified_columns <- gsub("\\.$", "", gsub("\\.", "-", sub("(\\d{2})$", "", colnames(read_cna_data)[3:length(colnames(read_cna_data))])))
+modified_columns<- as.data.frame(modified_columns)
+modified_columns$id <- substr(modified_columns$modified_columns, 1, nchar(modified_columns$modified_columns) - 1)
+modified_columns$RNA_seq_ID <- colnames(read_cna_data)[3:length(colnames(read_cna_data))]
+patient_ID<- as.data.frame(read_patient_data$X.Patient.Identifier)
+colnames(patient_ID)<- 'id'
+
+# matching rows 
+patient_ID <- merge(modified_columns,patient_ID,by='id',all=TRUE)
+patient_ID <- na.omit(patient_ID)
+
+# getting the required or matched columns
+correct_columns <- patient_ID$RNA_seq_ID
+
+# assay matrix is modified to include only the matching columns
+assay <- assay[, colnames(assay) %in% correct_columns]
+matching_ID <- rownames(value_ERBB2) %in% colnames(assay)
+
+# matching ID's are kept based on ERBB2 
+ERBB2_subset <- value_ERBB2[matching_ID, , drop = FALSE]
+
+
+```
+
+## 7. Create Metadata using CNA level of ERBB2+(greater than 0 means amplified)
+```{r}
+# build metadata
+metadata = matrix(0, nrow = nrow(ERBB2_subset), ncol = 1)
+colnames(metadata) = "HER2_level"
+
+# HER2 status
+metadata[, 1] = ifelse(as.numeric(ERBB2_subset[, "ERBB2_Count"])>0,1,0)
+```
+
+```{r}
+head(metadata)
+```
+## 8. Normalize data using DESeq2
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+```
+
+```{r}
+BiocManager::install("DESeq2")
+```
+```{r}
+library(DESeq2)
+```
+
+
+```{r}
+#imputing zeros with NA
+assay[is.na(assay)] = 0 
+assay[assay<0] = 0
+
+# filtering genes with so many missing values
+
+smallestGroupSize = 3
+keep = rowSums(assay >= 10) >= smallestGroupSize
+assay = assay[keep,]
+
+#deseq object is created
+dds =  DESeqDataSetFromMatrix(countData = assay,
+                              colData = metadata,
+                              design = ~ HER2_level)
+```
+
+```{r}
+#normalization
+desq <- DESeq(dds)
+```
+
+```{r}
+#listing the coefficients
+resultsNames(desq)
+```
+
+## 9. Obtain differentially expressed genes
+
+```{r}
+res = results(desq)
+
+# top 10 most differentially expressed genes
+res[order(res$padj)[1:10],]
+```
+## 10. Perform a Pathway enrichment analysis
+
+To perform the pathway enrichment analysis the list of differentially expressed
+genes must be considered. Different tools are available for for pathway enrichment
+analysis such as clusterProfiler, enrichGO, 
+
+```{r}
+if (!requireNamespace("clusterProfiler", quietly = TRUE))
+  BiocManager::install("clusterProfiler")
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db")
+```
+```{r}
+if (!requireNamespace("enrichplot", quietly = TRUE))
+  install.packages("enrichplot")
+```
+
+```{r}
+library(enrichplot)
+library(org.Hs.eg.db)
+
+library(clusterProfiler)
+```
+### Gene Ontology (GO) Pathway Enrichment Analysis
+
+```{r}
+# creating a subset of differentially expressed genes based on p-values
+
+res_sig = res[res$padj<0.05,]
+
+# separate the genes into over and under-expressed using log2 fold change. 
+DE_genes_over = rownames(res_sig[res_sig$log2FoldChange>0,])
+DE_genes_under = rownames(res_sig[res_sig$log2FoldChange<0,])
+
+go_results_over = enrichGO(
+  gene          = DE_genes_over,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# print and plot results
+print(head(go_results_over))
+```
+
+
+
+```{r}
+# for under expressed genes
+go_results_under = enrichGO(
+  gene          = DE_genes_under,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# print and plot results
+print(head(go_results_under))
+```
+```{r}
+dotplot(go_results_under, showCategory=10) + ggtitle("Gene Ontology Enrichment Under Expressed")
+
+```
+```{r}
+dotplot(go_results_over, showCategory=10) + ggtitle("Gene Ontology Enrichment over Expressed")
+```
+```{r}
+go_results_under_pw = pairwise_termsim(go_results_under)
+treeplot(go_results_under_pw)+ ggtitle("GO Enrichment analysis Under Expressed")
+```
+
+### KEGG Pathway enrichment analysis
+
+```{r}
+if (!requireNamespace("pathview", quietly = TRUE))
+  BiocManager::install("pathview")
+```
+```{r}
+if (!requireNamespace("ReactomePA", quietly = TRUE))
+  BiocManager::install("ReactomePA")
+
+library(ReactomePA)
+```
+
+
+```{r}
+library(pathview)
+
+# mapping into entrez is required for Reactome and Keggs
+gene_entrez_over <- bitr(
+  DE_genes_over,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+```
+
+
+```{r}
+gene_entrez_under <- bitr(
+  DE_genes_under,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+```
+
+```{r}
+# for over expressed genes
+kegg_results_over =  enrichKEGG(
+  gene          = gene_entrez_over[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# for under expressed genes
+kegg_results_under =  enrichKEGG(
+  gene          = gene_entrez_under[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+print(head(kegg_results_over))
+```
+
+
+
+```{r}
+print(head(kegg_results_under))
+```
+```{r}
+dotplot(kegg_results_over, showCategory=10) + ggtitle("Kegg Pathway Enrichment Over Expressed")
+```
+```{r}
+dotplot(kegg_results_under, showCategory=10) + ggtitle("Kegg Pathway Enrichment Under Expressed")
+```
+```{r}
+kegg_results_under_pw = pairwise_termsim(kegg_results_under)
+treeplot(kegg_results_under_pw)+ ggtitle("KEGG Enrichment analysis Under Expressed")
+```
+## 11. Get the variance stabilised transformed expression values 
+
+```{r}
+vsd = vst(desq)
+```
+
+```{r}
+vsd
+```
+## 12. With the vst values obtain a PCA plot and a heatmap
+```{r}
+# creating a PCA plot
+plotPCA(vsd, intgroup=c("HER2_level")) 
+```
+
+```{r}
+# for plotting a heatmap
+if (!requireNamespace("pheatmap", quietly = TRUE))
+  install.packages("pheatmap")
+
+
+library(pheatmap)
+```
+
+```{r}
+# Subset the dataset on differentially expressed gene for this assignment. 
+top_DE_genes = order(res$padj)
+
+# to visualize top 20 genes 
+vsd_DE_genes = assay(vsd)[top_DE_genes[1:20],]
+ 
+```
+
+
+```{r}
+annotation_colors = list(HER2_level = c(HER2_AMPLIFIED = "#1f78b4", HER2_NOT_AMPLIFIED = "#33a02c"))
+
+
+
+annotation_col = data.frame(HER2_level = as.matrix(metadata[,1]))
+rownames(annotation_col) = colnames(vsd)
+
+
+pheatmap(
+  vsd_DE_genes,
+  cluster_rows = TRUE,      
+  cluster_cols = TRUE,  
+  scale = 'row',
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  annotation_col = annotation_col)
+```
+
+
+
+
+
+
